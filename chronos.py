@@ -8,11 +8,12 @@ con Python): sin HTML, sin CSS y sin librerías externas.
 
     python chronos.py
 
-Secciones (teclas 1-3 o flechas ← →):
+Secciones (teclas 1-4 o flechas ← →):
   1 Reloj       analógico neón + digital, hora en palabras, progreso del
                 día/semana/mes/año, recorrido del sol y fase lunar real.
   2 Mundo       9 ciudades con horario de verano calculado a mano.
   3 Cronómetro  vueltas, mejor/peor vuelta y gráfico de barras.
+  4 Pomodoro    ciclos de enfoque/descanso con respiración guiada.
 
 Atajos: T tema · H 12/24 h · Z modo zen · F pantalla completa
         M sonido · C campanada cada hora · clic = chispas
@@ -63,11 +64,13 @@ NUM = ("cero uno dos tres cuatro cinco seis siete ocho nueve diez once doce trec
 HORAS_TXT = "doce una dos tres cuatro cinco seis siete ocho nueve diez once".split()
 
 CHIME = [(1046, 110), (1318, 110), (1568, 220)]
+POMO_SOUND = [(784, 140), (988, 140), (1175, 140), (1568, 320)]
 
 HINTS = {
     "reloj": "Clic en cualquier parte = chispas  ·  H 12/24 h  ·  C campanada horaria",
     "mundo": "Horario de verano calculado automáticamente  ·  H 12/24 h",
     "crono": "Espacio iniciar/pausar  ·  L vuelta  ·  R reiniciar",
+    "pomo": "Espacio iniciar/pausar  ·  S saltar fase  ·  R reiniciar",
 }
 
 
@@ -234,8 +237,10 @@ class Sound:
 # ───────────────────────────── aplicación ─────────────────────────────
 
 class Chronos:
-    TABS = [("reloj", "Reloj"), ("mundo", "Mundo"), ("crono", "Cronómetro")]
+    TABS = [("reloj", "Reloj"), ("mundo", "Mundo"), ("crono", "Cronómetro"),
+            ("pomo", "Pomodoro")]
     GLOW = ((11, .92), (7, .82), (4, .62))
+    POMO_NAMES = {"work": "ENFOQUE", "short": "DESCANSO CORTO", "long": "DESCANSO LARGO"}
 
     def __init__(self, root):
         self.root = root
@@ -290,6 +295,10 @@ class Chronos:
 
         # cronómetro
         self.sw_run, self.sw_t0, self.sw_acc, self.laps = False, 0.0, 0.0, []
+        # pomodoro
+        self.pcfg = {"work": 25, "short": 5, "long": 15}
+        self.pphase, self.pleft, self.prun, self.pend = "work", 25 * 60.0, False, 0.0
+        self.pdone, self.pfocus = 0, 0
 
         self.cv.bind("<Configure>", self.on_resize)
         self.cv.bind("<Motion>", self.on_motion)
@@ -456,6 +465,8 @@ class Chronos:
         self.now = dt.datetime.fromtimestamp(self.now_ts)
         self.T = T = self.theme()
         self.events()
+        if self.prun and self.now_ts >= self.pend:
+            self.pomo_complete()
 
         cv = self.cv
         cv.delete("all")
@@ -648,7 +659,7 @@ class Chronos:
         self.gline([self.ind_x, h - 7, self.ind_x + self.ind_w, h - 7], T["a1"], 3, bg)
 
     def draw_footer(self, T):
-        txt = HINTS[self.mode] + "   ·   1-3 / ← → secciones  ·  T tema  ·  Z zen  ·  F pantalla completa  ·  M sonido"
+        txt = HINTS[self.mode] + "   ·   1-4 / ← → secciones  ·  T tema  ·  Z zen  ·  F pantalla completa  ·  M sonido"
         self.cv.create_text(self.W / 2, self.H - 14, text=txt, font=self.F(11), fill=mix(T["dim"], T["bg"], .1))
 
     def draw_toast(self, T):
@@ -1084,6 +1095,142 @@ class Chronos:
             cv.create_text(cx0, cy0 - chart_h + 8, text="MEJOR", anchor="w", font=self.F(11, "bold"), fill=P["a1"])
             cv.create_text(cx0 + 60, cy0 - chart_h + 8, text="PEOR", anchor="w", font=self.F(11, "bold"), fill=P["a2"])
 
+    # ───────── 4. POMODORO ─────────
+
+    def pomo_left(self):
+        return max(0.0, self.pend - self.now_ts) if self.prun else self.pleft
+
+    def pomo_toggle(self):
+        if self.prun:
+            self.pleft = max(0.0, self.pend - time.time())
+            self.prun = False
+        else:
+            self.pend = time.time() + self.pleft
+            self.prun = True
+
+    def pomo_advance(self, counted):
+        if self.pphase == "work":
+            if counted:
+                self.pdone += 1
+                self.pfocus += self.pcfg["work"]
+            nxt = "long" if counted and self.pdone % 4 == 0 else "short"
+        else:
+            nxt = "work"
+        self.pphase = nxt
+        self.pleft = self.pcfg[nxt] * 60.0
+        self.pend = time.time() + self.pleft
+
+    def pomo_complete(self):
+        was_work = self.pphase == "work"
+        self.pomo_advance(True)
+        self.prun = True
+        self.sound.play(POMO_SOUND)
+        self.flash = 1.0
+        cx, cy, R = self.ring_c or (self.W / 2, self.H / 2, 200)
+        for i in range(3):
+            self.wave(cx, cy, R * .5 + i * 30, R * 2, (self.T["a1"], self.T["a2"], self.T["a3"])[i], 60)
+        self.toast("¡Sesión completada! Hora de descansar" if was_work else "Descanso terminado · ¡a enfocarse!")
+
+    def pomo_skip(self):
+        self.pomo_advance(False)
+        if not self.prun:
+            self.pleft = self.pcfg[self.pphase] * 60.0
+
+    def pomo_reset(self):
+        self.prun, self.pphase, self.pleft = False, "work", self.pcfg["work"] * 60.0
+
+    def pomo_adj(self, key, d):
+        self.pcfg[key] = int(clamp(self.pcfg[key] + d, 1, 90))
+        if not self.prun and self.pphase == key:
+            self.pleft = self.pcfg[key] * 60.0
+
+    def draw_pomo(self, P, top):
+        cv, W, H, bg, t = self.cv, self.W, self.H, P["bg"], self.now_ts
+        cx, cy, R = self.ring_layout(top)
+        total = self.pcfg[self.pphase] * 60
+        left = self.pomo_left()
+        rem = clamp(left / total, 0, 1) if total else 0
+        work = self.pphase == "work"
+        pcol = P["a2"] if work else P["a1"]
+
+        if not work:  # círculo de respiración guiada (4 s inhalar, 4 s exhalar)
+            b = .5 - .5 * math.cos(TAU * t / 8)
+            for i in range(5, 0, -1):
+                rr = R * (.4 + .45 * b) * (.5 + .1 * i)
+                cv.create_oval(cx - rr, cy - rr, cx + rr, cy + rr, fill=mix(P["a1"], bg, .93 - .05 * (5 - i)),
+                               outline=mix(P["a1"], bg, .75) if i == 5 else "")
+        else:
+            rr = R * .78
+            for k in range(24):
+                cv.create_arc(cx - rr, cy - rr, cx + rr, cy + rr, start=(-t * 8 + k * 15) % 360, extent=5,
+                              style="arc", outline=mix(P["a3"], bg, .7), width=2)
+
+        cv.create_oval(cx - R, cy - R, cx + R, cy + R, outline=mix(pcol, bg, .88), width=16)
+        if rem > 0:
+            self.garc(cx, cy, R, 90, -rem * 360, pcol, 12, bg)
+            nseg = 90
+            segs = rem * nseg
+            for i in range(int(math.ceil(segs))):
+                ext = 4 if i < int(segs) else (segs - i) * 4
+                cv.create_arc(cx - R, cy - R, cx + R, cy + R, start=(90 - i * 4) % 360, extent=-min(ext + .6, 4.6),
+                              style="arc", outline=mix(P["a1"], P["a2"], i / nseg), width=14)
+            a = rem * TAU
+            hx, hy = cx + R * math.sin(a), cy - R * math.cos(a)
+            self.gdot(hx, hy, 9, mix(pcol, "#ffffff", .5), bg)
+            if self.prun and random.random() < .4:
+                self.spark(hx, hy, pcol, speed=2, life=35)
+
+        m, s = divmod(int(math.ceil(left)), 60)
+        dsz = R * .4
+        self.gtext(cx, cy, f"{m:02d}:{s:02d}", self.F(dsz, "bold", True), P["txt"], bg, glow_col=pcol)
+        cv.create_text(cx, cy - dsz * .9, text=self.POMO_NAMES[self.pphase], font=self.F(16, "bold"), fill=pcol)
+        if not work and self.prun:
+            sub = "Inhala…" if math.sin(TAU * t / 8) > 0 else "Exhala…"
+        elif self.prun:
+            sub = "Mantén el foco"
+        else:
+            sub = "En pausa · Espacio para iniciar"
+        cv.create_text(cx, cy + dsz * .78, text=sub, font=self.F(14, "italic"), fill=mix(P["txt"], bg, .3))
+        done_cycle = self.pdone % 4 if not (self.pphase == "long" and self.pdone) else 4
+        for i in range(4):
+            dx = cx + (i - 1.5) * 26
+            dy = cy + dsz * 1.25
+            if i < done_cycle:
+                self.gdot(dx, dy, 7, P["a2"], bg, glow=2)
+            else:
+                cv.create_oval(dx - 7, dy - 7, dx + 7, dy + 7, outline=mix(P["a2"], bg, .55), width=2)
+
+        bw, bh, g = 150, 46, 16
+        by = cy + R + 44
+        bx = cx - (bw * 3 + g * 2) / 2
+        self.button(bx, by, bw, bh, "PAUSAR" if self.prun else "INICIAR", self.pomo_toggle, P, active=self.prun)
+        self.button(bx + bw + g, by, bw, bh, "SALTAR", self.pomo_skip, P, col=P["a2"])
+        self.button(bx + 2 * (bw + g), by, bw, bh, "REINICIAR", self.pomo_reset, P, col=P["a3"])
+
+        px = W * .62
+        pw, py, ph = W - 40 - px, top + 26, H - top - 70
+        self.panel(px, py, pw, ph, "CONFIGURACIÓN", P)
+        ry = py + 84
+        for label, key in (("Enfoque", "work"), ("Descanso corto", "short"), ("Descanso largo", "long")):
+            cv.create_text(px + 26, ry, text=label, anchor="w", font=self.F(15, "bold"),
+                           fill=P["txt"] if key == self.pphase else mix(P["txt"], bg, .3))
+            bx2 = px + pw - 26 - 150
+            self.button(bx2, ry - 17, 40, 34, "−", lambda k=key: self.pomo_adj(k, -1), P, px=18)
+            cv.create_text(bx2 + 75, ry, text=f"{self.pcfg[key]} min", font=self.F(15, "bold", True), fill=P["a1"])
+            self.button(bx2 + 110, ry - 17, 40, 34, "+", lambda k=key: self.pomo_adj(k, 1), P, px=18)
+            ry += 58
+        cv.create_line(px + 26, ry - 10, px + pw - 26, ry - 10, fill=mix(P["a1"], bg, .8))
+        ry += 20
+        for label, val in (("Sesiones completadas", str(self.pdone)), ("Minutos de enfoque", str(self.pfocus)),
+                           ("Ciclo actual", f"{done_cycle} / 4")):
+            cv.create_text(px + 26, ry, text=label, anchor="w", font=self.F(14), fill=P["dim"])
+            cv.create_text(px + pw - 26, ry, text=val, anchor="e", font=self.F(18, "bold", True), fill=P["a2"])
+            ry += 36
+        cv.create_text(px + 26, ry + 20, anchor="nw", width=pw - 52, font=self.F(13, "italic"),
+                       fill=mix(P["txt"], bg, .4),
+                       text="Cada 4 sesiones de enfoque llega un descanso largo. En los descansos, "
+                            "sigue el círculo: inhala cuando crece, exhala cuando se encoge.")
+
     # ───────── entrada ─────────
 
     def set_mode(self, key):
@@ -1130,7 +1277,7 @@ class Chronos:
     def on_key(self, e):
         k = e.keysym.lower()
         keys = [key for key, _ in self.TABS]
-        if k in "123" and len(k) == 1:
+        if k in "1234" and len(k) == 1:
             self.set_mode(keys[int(k) - 1])
         elif k in ("right", "left"):
             self.set_mode(keys[(keys.index(self.mode) + (1 if k == "right" else -1)) % len(keys)])
@@ -1161,6 +1308,8 @@ class Chronos:
         elif k == "space":
             if self.mode == "crono":
                 self.sw_toggle()
+            elif self.mode == "pomo":
+                self.pomo_toggle()
             elif self.clock_c:
                 self.burst(*self.clock_c[:2], 40)
         elif k == "l" and self.mode == "crono":
@@ -1168,6 +1317,10 @@ class Chronos:
         elif k == "r":
             if self.mode == "crono":
                 self.sw_reset()
+            elif self.mode == "pomo":
+                self.pomo_reset()
+        elif k == "s" and self.mode == "pomo":
+            self.pomo_skip()
 
     def on_close(self):
         self.root.destroy()
