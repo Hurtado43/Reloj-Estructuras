@@ -8,9 +8,10 @@ con Python): sin HTML, sin CSS y sin librerías externas.
 
     python chronos.py
 
-Secciones:
+Secciones (teclas 1-2 o flechas ← →):
   1 Reloj       analógico neón + digital, hora en palabras, progreso del
                 día/semana/mes/año, recorrido del sol y fase lunar real.
+  2 Mundo       9 ciudades con horario de verano calculado a mano.
 
 Atajos: T tema · H 12/24 h · Z modo zen · F pantalla completa
         M sonido · C campanada cada hora · clic = chispas
@@ -46,6 +47,12 @@ THEMES = [
      "a3": "#4f7cff", "txt": "#eef7ff", "dim": "#5b7090"},
 ]
 
+CIUDADES = [  # (nombre, UTC estándar, regla de horario de verano)
+    ("Los Ángeles", -8, "US"), ("Nueva York", -5, "US"), ("Bogotá", -5, None),
+    ("Buenos Aires", -3, None), ("Londres", 0, "EU"), ("Madrid", 1, "EU"),
+    ("Dubái", 4, None), ("Tokio", 9, None), ("Sídney", 10, "AU"),
+]
+
 DIAS = ["lunes", "martes", "miércoles", "jueves", "viernes", "sábado", "domingo"]
 MESES = ["enero", "febrero", "marzo", "abril", "mayo", "junio", "julio", "agosto",
          "septiembre", "octubre", "noviembre", "diciembre"]
@@ -58,6 +65,7 @@ CHIME = [(1046, 110), (1318, 110), (1568, 220)]
 
 HINTS = {
     "reloj": "Clic en cualquier parte = chispas  ·  H 12/24 h  ·  C campanada horaria",
+    "mundo": "Horario de verano calculado automáticamente  ·  H 12/24 h",
 }
 
 
@@ -102,6 +110,47 @@ def fmt_dur(secs):
     if h:
         return f"{h} h {m} min"
     return f"{m} min {s} s"
+
+
+def fmt_off(o):
+    sign = "+" if o >= 0 else "-"
+    a = abs(o)
+    h = int(a)
+    m = int(round((a - h) * 60))
+    return f"{sign}{h}" + (f":{m:02d}" if m else "")
+
+
+def local_offset():
+    return dt.datetime.now().astimezone().utcoffset().total_seconds() / 3600
+
+
+def nth_sunday(year, month, n):
+    """n-ésimo domingo del mes (n=-1 → último)."""
+    if n > 0:
+        d = dt.date(year, month, 1)
+        d += dt.timedelta(days=(6 - d.weekday()) % 7)
+        return d + dt.timedelta(weeks=n - 1)
+    d = dt.date(year + (month == 12), month % 12 + 1, 1) - dt.timedelta(days=1)
+    return d - dt.timedelta(days=(d.weekday() - 6) % 7)
+
+
+def utc_offset(base, rule, utc):
+    """Desfase UTC de una ciudad aplicando su regla de horario de verano."""
+    y = utc.year
+    if rule == "EU":
+        start = dt.datetime.combine(nth_sunday(y, 3, -1), dt.time(1))
+        end = dt.datetime.combine(nth_sunday(y, 10, -1), dt.time(1))
+        return base + (1 if start <= utc < end else 0)
+    std = utc + dt.timedelta(hours=base)
+    if rule == "US":
+        start = dt.datetime.combine(nth_sunday(y, 3, 2), dt.time(2))
+        end = dt.datetime.combine(nth_sunday(y, 11, 1), dt.time(1))
+        return base + (1 if start <= std < end else 0)
+    if rule == "AU":
+        start = dt.datetime.combine(nth_sunday(y, 10, 1), dt.time(2))
+        end = dt.datetime.combine(nth_sunday(y, 4, 1), dt.time(2))
+        return base + (1 if std >= start or std < end else 0)
+    return base
 
 
 def frase_hora(h, m):
@@ -175,7 +224,7 @@ class Sound:
 # ───────────────────────────── aplicación ─────────────────────────────
 
 class Chronos:
-    TABS = [("reloj", "Reloj")]
+    TABS = [("reloj", "Reloj"), ("mundo", "Mundo")]
     GLOW = ((11, .92), (7, .82), (4, .62))
 
     def __init__(self, root):
@@ -587,7 +636,7 @@ class Chronos:
         self.gline([self.ind_x, h - 7, self.ind_x + self.ind_w, h - 7], T["a1"], 3, bg)
 
     def draw_footer(self, T):
-        txt = HINTS[self.mode] + "   ·   1-1 / ← → secciones  ·  T tema  ·  Z zen  ·  F pantalla completa  ·  M sonido"
+        txt = HINTS[self.mode] + "   ·   1-2 / ← → secciones  ·  T tema  ·  Z zen  ·  F pantalla completa  ·  M sonido"
         self.cv.create_text(self.W / 2, self.H - 14, text=txt, font=self.F(11), fill=mix(T["dim"], T["bg"], .1))
 
     def draw_toast(self, T):
@@ -833,6 +882,78 @@ class Chronos:
             ox, oy, rr = cx + dx * r, cy + dy * r, cr * r
             cv.create_oval(ox - rr, oy - rr, ox + rr, oy + rr, outline=mix(lit, "#000000", .18), width=1)
 
+    # ───────── 2. MUNDO ─────────
+
+    def draw_mundo(self, P, top):
+        cv, W, H, bg = self.cv, self.W, self.H, P["bg"]
+        utc = dt.datetime.now(dt.timezone.utc).replace(tzinfo=None)
+        loff = local_offset()
+        cv.create_text(40, top + 36, text="RELOJ MUNDIAL", anchor="w", font=self.F(24, "bold"), fill=P["txt"])
+        cv.create_text(W - 40, top + 36, anchor="e", font=self.F(14, mono=True), fill=P["dim"],
+                       text=f"Tu zona: UTC{fmt_off(loff)}   ·   UTC {utc:%H:%M:%S}")
+        gap = 18
+        x0, y0 = 40, top + 70
+        cw = (W - 80 - gap * 2) / 3
+        ch = (H - y0 - 44 - gap * 2) / 3
+        for i, (name, base, rule) in enumerate(CIUDADES):
+            off = utc_offset(base, rule, utc)
+            ct = utc + dt.timedelta(hours=off)
+            x = x0 + (i % 3) * (cw + gap)
+            y = y0 + (i // 3) * (ch + gap)
+            hv = self.hov(x, y, x + cw, y + ch)
+            if hv:
+                y -= 4
+            day = 6 <= ct.hour < 18
+            face = mix(P["bg2"], P["a1"], .08) if day else mix(P["bg2"], bg, .4)
+            if hv:
+                self.rrect(x - 4, y - 4, x + cw + 4, y + ch + 4, 20, fill="", outline=mix(P["a1"], bg, .72), width=5)
+            self.rrect(x, y, x + cw, y + ch, 16, fill=face, outline=P["a1"] if hv else mix(P["a1"], bg, .72),
+                       width=2 if hv else 1)
+            r = min(ch * .34, cw * .19)
+            mcx, mcy = x + 22 + r, y + ch / 2
+            self.mini_clock(mcx, mcy, r, ct, P, face)
+            tx = mcx + r + 24
+            cv.create_text(tx, y + ch * .27, text=name, anchor="w", font=self.F(max(14, ch * .13), "bold"), fill=P["txt"])
+            hh = ct.hour if self.h24 else (ct.hour % 12 or 12)
+            suf = "" if self.h24 else (" AM" if ct.hour < 12 else " PM")
+            cv.create_text(tx, y + ch * .52, text=f"{hh:02d}:{ct.minute:02d}:{ct.second:02d}{suf}", anchor="w",
+                           font=self.F(max(16, ch * .17), "bold", True), fill=P["a1"])
+            diff = off - loff
+            dd = (ct.date() - self.now.date()).days
+            rel = "misma hora" if abs(diff) < .01 else f"{diff:+g} h"
+            rel += " · mañana" if dd == 1 else " · ayer" if dd == -1 else ""
+            cv.create_text(tx, y + ch * .76, text=f"UTC{fmt_off(off)}  ·  {rel}", anchor="w",
+                           font=self.F(max(11, ch * .08)), fill=P["dim"])
+            ix, iy = x + cw - 28, y + 28
+            if day:
+                rot = self.now_ts * .5
+                for j in range(8):
+                    a = rot + j / 8 * TAU
+                    cv.create_line(ix + 9 * math.cos(a), iy + 9 * math.sin(a), ix + 13 * math.cos(a),
+                                   iy + 13 * math.sin(a), fill="#ffd25a", width=2)
+                cv.create_oval(ix - 6, iy - 6, ix + 6, iy + 6, fill="#ffd25a", outline="")
+            else:
+                cv.create_oval(ix - 8, iy - 8, ix + 8, iy + 8, fill=P["txt"], outline="")
+                cv.create_oval(ix - 4, iy - 11, ix + 12, iy + 5, fill=face, outline="")
+
+    def mini_clock(self, cx, cy, r, t, P, face):
+        cv, bg = self.cv, P["bg"]
+        cv.create_oval(cx - r - 5, cy - r - 5, cx + r + 5, cy + r + 5, outline=mix(P["a1"], bg, .82), width=3)
+        cv.create_oval(cx - r, cy - r, cx + r, cy + r, fill=mix(face, bg, .35), outline=mix(P["a1"], bg, .45), width=2)
+        for i in range(12):
+            a = i / 12 * TAU
+            l = r * (.17 if i % 3 == 0 else .08)
+            cv.create_line(cx + (r - 4) * math.sin(a), cy - (r - 4) * math.cos(a), cx + (r - 4 - l) * math.sin(a),
+                           cy - (r - 4 - l) * math.cos(a), fill=mix(P["txt"], bg, .3 if i % 3 == 0 else .55),
+                           width=2 if i % 3 == 0 else 1)
+        s = t.second + t.microsecond / 1e6
+        m = t.minute + s / 60
+        h = t.hour % 12 + m / 60
+        for val, length, w, col in ((h / 12, .5, 5, P["a3"]), (m / 60, .74, 3, P["a2"]), (s / 60, .84, 1, P["a1"])):
+            a = val * TAU
+            self.gline([cx, cy, cx + r * length * math.sin(a), cy - r * length * math.cos(a)], col, w, bg, glow=1)
+        cv.create_oval(cx - 4, cy - 4, cx + 4, cy + 4, fill=P["a1"], outline="")
+
     # ───────── entrada ─────────
 
     def set_mode(self, key):
@@ -879,7 +1000,7 @@ class Chronos:
     def on_key(self, e):
         k = e.keysym.lower()
         keys = [key for key, _ in self.TABS]
-        if k in "1" and len(k) == 1:
+        if k in "12" and len(k) == 1:
             self.set_mode(keys[int(k) - 1])
         elif k in ("right", "left"):
             self.set_mode(keys[(keys.index(self.mode) + (1 if k == "right" else -1)) % len(keys)])
