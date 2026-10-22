@@ -8,13 +8,14 @@ con Python): sin HTML, sin CSS y sin librerías externas.
 
     python chronos.py
 
-Secciones (teclas 1-5 o flechas ← →):
+Secciones (teclas 1-6 o flechas ← →):
   1 Reloj       analógico neón + digital, hora en palabras, progreso del
                 día/semana/mes/año, recorrido del sol y fase lunar real.
   2 Mundo       9 ciudades con horario de verano calculado a mano.
   3 Cronómetro  vueltas, mejor/peor vuelta y gráfico de barras.
   4 Pomodoro    ciclos de enfoque/descanso con respiración guiada.
   5 Alarmas     se guardan en chronos_alarmas.json, con posponer.
+  6 Binario     reloj binario BCD + timestamp Unix en bits.
 
 Atajos: T tema · H 12/24 h · Z modo zen · F pantalla completa
         M sonido · C campanada cada hora · clic = chispas
@@ -76,6 +77,7 @@ HINTS = {
     "crono": "Espacio iniciar/pausar  ·  L vuelta  ·  R reiniciar",
     "pomo": "Espacio iniciar/pausar  ·  S saltar fase  ·  R reiniciar",
     "alarmas": "Flechas: ±1  ·  Rueda del ratón sobre los dígitos: ±1 h / ±5 min  ·  Enter agregar",
+    "binario": "Suma los valores de los LEDs encendidos en cada columna",
 }
 
 
@@ -263,7 +265,7 @@ class Sound:
 
 class Chronos:
     TABS = [("reloj", "Reloj"), ("mundo", "Mundo"), ("crono", "Cronómetro"),
-            ("pomo", "Pomodoro"), ("alarmas", "Alarmas")]
+            ("pomo", "Pomodoro"), ("alarmas", "Alarmas"), ("binario", "Binario")]
     GLOW = ((11, .92), (7, .82), (4, .62))
     POMO_NAMES = {"work": "ENFOQUE", "short": "DESCANSO CORTO", "long": "DESCANSO LARGO"}
 
@@ -328,6 +330,8 @@ class Chronos:
         self.alarms = self.load_alarms()
         self.new_h, self.new_m = 7, 0
         self.ringing, self.ring_t0, self._bell_tick = None, 0.0, 0
+        # binario
+        self.bin_state = {}
 
         self.cv.bind("<Configure>", self.on_resize)
         self.cv.bind("<Motion>", self.on_motion)
@@ -695,7 +699,7 @@ class Chronos:
         self.gline([self.ind_x, h - 7, self.ind_x + self.ind_w, h - 7], T["a1"], 3, bg)
 
     def draw_footer(self, T):
-        txt = HINTS[self.mode] + "   ·   1-5 / ← → secciones  ·  T tema  ·  Z zen  ·  F pantalla completa  ·  M sonido"
+        txt = HINTS[self.mode] + "   ·   1-6 / ← → secciones  ·  T tema  ·  Z zen  ·  F pantalla completa  ·  M sonido"
         self.cv.create_text(self.W / 2, self.H - 14, text=txt, font=self.F(11), fill=mix(T["dim"], T["bg"], .1))
 
     def draw_toast(self, T):
@@ -1499,6 +1503,85 @@ class Chronos:
         self.button(cx - bw - 10, y + ph - 82, bw, 52, "DETENER  (Esc)", self.stop_alarm, T, col=T["a2"], active=True)
         self.button(cx + 10, y + ph - 82, bw, 52, "POSPONER 5 MIN  (P)", lambda: self.stop_alarm(True), T, px=13)
 
+    # ───────── 6. BINARIO ─────────
+
+    def draw_binario(self, P, top):
+        cv, W, H, bg, n, t = self.cv, self.W, self.H, P["bg"], self.now, self.now_ts
+        digits = [n.hour // 10, n.hour % 10, n.minute // 10, n.minute % 10, n.second // 10, n.second % 10]
+        maxb = [2, 4, 3, 4, 3, 4]
+        cols = [P["a1"], P["a1"], P["a2"], P["a2"], P["a3"], P["a3"]]
+        r = max(15, min((H - top) * .043, W * .027))
+        sp, gg = r * 3, r * 2.4
+        xs, x = [], 0.0
+        for c in range(6):
+            xs.append(x)
+            x += sp + (gg if c in (1, 3) else 0)
+        ox = W / 2 - xs[-1] / 2
+        xs = [ox + v for v in xs]
+        ys = [top + 76 + r * 2.2 + k * sp for k in range(4)]
+
+        for i, name in enumerate(("HORAS", "MINUTOS", "SEGUNDOS")):
+            gx = (xs[2 * i] + xs[2 * i + 1]) / 2
+            cv.create_text(gx, top + 40, text=name, font=self.F(15, "bold"), fill=cols[2 * i])
+            cv.create_line(xs[2 * i] - r, top + 58, xs[2 * i + 1] + r, top + 58, fill=mix(cols[2 * i], bg, .6), width=2)
+        for k in range(4):
+            cv.create_text(xs[0] - r * 2.4, ys[k], text=str(8 >> k), font=self.F(16, "bold", True), fill=P["dim"])
+
+        leds = []
+        for c in range(6):
+            for k in range(4):
+                bit = 8 >> k
+                if bit >= 2 ** maxb[c]:
+                    continue
+                on = bool(digits[c] & bit)
+                prev = self.bin_state.get((c, k))
+                if prev is None or prev[0] != on:
+                    self.bin_state[(c, k)] = (on, t)
+                    if on and prev is not None:
+                        for _ in range(8):
+                            self.spark(xs[c], ys[k], cols[c], speed=3, life=30)
+                leds.append((xs[c], ys[k], on, cols[c], t - self.bin_state[(c, k)][1]))
+        for lx, ly, on, col, age in leds:  # primero todos los halos…
+            if on:
+                boost = max(0.0, 1 - age / .5)
+                for f, k in ((1.75, .9), (1.45, .8), (1.2, .6)):
+                    rr = r * (1 + .25 * boost) * f
+                    cv.create_oval(lx - rr, ly - rr, lx + rr, ly + rr, fill=mix(col, bg, k - .12 * boost), outline="")
+        for lx, ly, on, col, age in leds:  # …luego los LEDs encima
+            if on:
+                rr = r * (1 + .25 * max(0.0, 1 - age / .5))
+                cv.create_oval(lx - rr, ly - rr, lx + rr, ly + rr, fill=col, outline=mix(col, "#ffffff", .5), width=2)
+                cv.create_oval(lx - r * .6, ly - r * .6, lx - r * .05, ly - r * .05, fill=mix(col, "#ffffff", .6),
+                               outline="")
+            else:
+                cv.create_oval(lx - r, ly - r, lx + r, ly + r, fill=mix(P["bg2"], bg, .3), outline=mix(col, bg, .65),
+                               width=2)
+        dy = ys[-1] + r * 2.3
+        for c in range(6):
+            cv.create_text(xs[c], dy, text=str(digits[c]), font=self.F(r * 1.1, "bold", True), fill=P["txt"])
+
+        iy = dy + r * 1.6 + 10
+        fi = self.F(16, mono=True)
+        cv.create_text(W / 2, iy, font=fi, fill=mix(P["txt"], bg, .2),
+                       text=f"Binario puro   {n.hour:05b} : {n.minute:06b} : {n.second:06b}")
+        cv.create_text(W / 2, iy + 28, font=fi, fill=mix(P["txt"], bg, .2),
+                       text=f"Hexadecimal    0x{n.hour:02X} : 0x{n.minute:02X} : 0x{n.second:02X}")
+        ts = int(t)
+        cv.create_text(W / 2, iy + 66, font=self.F(14, "bold"), fill=P["a1"],
+                       text=f"TIMESTAMP UNIX  ·  {ts:,} segundos desde 1970".replace(",", "."))
+        bits = f"{ts & 0xFFFFFFFF:032b}"
+        q = min(18.0, (W - 160) / 32 - 4)
+        bx0 = W / 2 - (32 * (q + 4) - 4) / 2
+        by0 = iy + 86
+        for i, b in enumerate(bits):
+            x1 = bx0 + i * (q + 4)
+            if b == "1":
+                c = mix(P["a1"], P["a2"], i / 31)
+                cv.create_rectangle(x1 - 2, by0 - 2, x1 + q + 2, by0 + q + 2, fill=mix(c, bg, .7), outline="")
+                cv.create_rectangle(x1, by0, x1 + q, by0 + q, fill=c, outline="")
+            else:
+                cv.create_rectangle(x1, by0, x1 + q, by0 + q, fill="", outline=mix(P["dim"], bg, .4))
+
     # ───────── entrada ─────────
 
     def set_mode(self, key):
@@ -1552,7 +1635,7 @@ class Chronos:
                 self.stop_alarm(snooze=True)
             return
         keys = [key for key, _ in self.TABS]
-        if k in "12345" and len(k) == 1:
+        if k in "123456" and len(k) == 1:
             self.set_mode(keys[int(k) - 1])
         elif k in ("right", "left"):
             self.set_mode(keys[(keys.index(self.mode) + (1 if k == "right" else -1)) % len(keys)])
