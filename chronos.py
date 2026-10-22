@@ -1,24 +1,12 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-CHRONOS · Reloj neón interactivo en Python puro
+CHRONOS · Reloj neón interactivo en Python 
 ================================================
-Toda la interfaz está dibujada a mano sobre un Canvas de tkinter (incluido
-con Python): sin HTML, sin CSS y sin librerías externas.
+Toda la interfaz está dibujada a mano sobre un Canvas de tkinter con Python: sin HTML, sin CSS y sin librerías externas.
 
     python chronos.py
 
-Secciones (teclas 1-6 o flechas ← →):
-  1 Reloj       analógico neón + digital, hora en palabras, progreso del
-                día/semana/mes/año, recorrido del sol y fase lunar real.
-  2 Mundo       9 ciudades con horario de verano calculado a mano.
-  3 Cronómetro  vueltas, mejor/peor vuelta y gráfico de barras.
-  4 Pomodoro    ciclos de enfoque/descanso con respiración guiada.
-  5 Alarmas     se guardan en chronos_alarmas.json, con posponer.
-  6 Binario     reloj binario BCD + timestamp Unix en bits.
-
-Atajos: T tema · H 12/24 h · Z modo zen · F pantalla completa
-        M sonido · C campanada cada hora · clic = chispas
 """
 
 import datetime as dt
