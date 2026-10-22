@@ -8,18 +8,20 @@ con Python): sin HTML, sin CSS y sin librerías externas.
 
     python chronos.py
 
-Secciones (teclas 1-4 o flechas ← →):
+Secciones (teclas 1-5 o flechas ← →):
   1 Reloj       analógico neón + digital, hora en palabras, progreso del
                 día/semana/mes/año, recorrido del sol y fase lunar real.
   2 Mundo       9 ciudades con horario de verano calculado a mano.
   3 Cronómetro  vueltas, mejor/peor vuelta y gráfico de barras.
   4 Pomodoro    ciclos de enfoque/descanso con respiración guiada.
+  5 Alarmas     se guardan en chronos_alarmas.json, con posponer.
 
 Atajos: T tema · H 12/24 h · Z modo zen · F pantalla completa
         M sonido · C campanada cada hora · clic = chispas
 """
 
 import datetime as dt
+import json
 import math
 import os
 import random
@@ -35,6 +37,7 @@ except ImportError:
 
 FRAME_MS = 33
 TAU = math.tau
+ALARM_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "chronos_alarmas.json")
 
 THEMES = [
     {"name": "Neón Cyber", "bg": "#05060f", "bg2": "#10143a", "a1": "#00f0ff", "a2": "#ff2bd6",
@@ -65,12 +68,14 @@ HORAS_TXT = "doce una dos tres cuatro cinco seis siete ocho nueve diez once".spl
 
 CHIME = [(1046, 110), (1318, 110), (1568, 220)]
 POMO_SOUND = [(784, 140), (988, 140), (1175, 140), (1568, 320)]
+ALARM_MELODY = [(880, 170), (0, 60), (1175, 170), (0, 60), (1568, 260), (0, 520)]
 
 HINTS = {
     "reloj": "Clic en cualquier parte = chispas  ·  H 12/24 h  ·  C campanada horaria",
     "mundo": "Horario de verano calculado automáticamente  ·  H 12/24 h",
     "crono": "Espacio iniciar/pausar  ·  L vuelta  ·  R reiniciar",
     "pomo": "Espacio iniciar/pausar  ·  S saltar fase  ·  R reiniciar",
+    "alarmas": "Flechas: ±1  ·  Rueda del ratón sobre los dígitos: ±1 h / ±5 min  ·  Enter agregar",
 }
 
 
@@ -215,6 +220,7 @@ class Sound:
     def __init__(self, root):
         self.root = root
         self.on = True
+        self.stop_evt = threading.Event()
 
     def _beep(self, f, d):
         try:
@@ -233,12 +239,31 @@ class Sound:
             return
         threading.Thread(target=lambda: [self._beep(f, d) for f, d in notes], daemon=True).start()
 
+    def alarm_start(self):
+        self.stop_evt.clear()
+        if winsound is None:
+            return
+
+        def run():
+            while not self.stop_evt.is_set():
+                if not self.on:
+                    time.sleep(0.2)
+                    continue
+                for f, d in ALARM_MELODY:
+                    if self.stop_evt.is_set():
+                        break
+                    self._beep(f, d)
+        threading.Thread(target=run, daemon=True).start()
+
+    def alarm_stop(self):
+        self.stop_evt.set()
+
 
 # ───────────────────────────── aplicación ─────────────────────────────
 
 class Chronos:
     TABS = [("reloj", "Reloj"), ("mundo", "Mundo"), ("crono", "Cronómetro"),
-            ("pomo", "Pomodoro")]
+            ("pomo", "Pomodoro"), ("alarmas", "Alarmas")]
     GLOW = ((11, .92), (7, .82), (4, .62))
     POMO_NAMES = {"work": "ENFOQUE", "short": "DESCANSO CORTO", "long": "DESCANSO LARGO"}
 
@@ -299,6 +324,10 @@ class Chronos:
         self.pcfg = {"work": 25, "short": 5, "long": 15}
         self.pphase, self.pleft, self.prun, self.pend = "work", 25 * 60.0, False, 0.0
         self.pdone, self.pfocus = 0, 0
+        # alarmas
+        self.alarms = self.load_alarms()
+        self.new_h, self.new_m = 7, 0
+        self.ringing, self.ring_t0, self._bell_tick = None, 0.0, 0
 
         self.cv.bind("<Configure>", self.on_resize)
         self.cv.bind("<Motion>", self.on_motion)
@@ -467,10 +496,14 @@ class Chronos:
         self.events()
         if self.prun and self.now_ts >= self.pend:
             self.pomo_complete()
+        if self.ringing and winsound is None and self.sound.on and int(self.now_ts) != self._bell_tick:
+            self._bell_tick = int(self.now_ts)
+            self.root.bell()
 
         cv = self.cv
         cv.delete("all")
         self.btns, self.wheels = [], []
+        self.block = self.ringing is not None
         self.flash *= 0.9
         cv.configure(bg=mix(T["bg"], T["a1"], self.flash * 0.22))
         self.draw_background(T)
@@ -485,6 +518,8 @@ class Chronos:
         if not self.zen:
             self.draw_nav(T)
             self.draw_footer(T)
+        if self.ringing:
+            self.draw_alarm(T)
         self.draw_fx(T)
         self.draw_toast(T)
         if self.S != 1:
@@ -504,6 +539,7 @@ class Chronos:
             if self.mode == "reloj" and self.clock_c:
                 cx, cy, R = self.clock_c
                 self.wave(cx, cy, R * .2, R * 1.7, self.T["a2"], frames=50)
+            self.check_alarms(n)
         if hms[0] != last[0]:
             self.flash = 1.0
             cx, cy = (self.clock_c[:2] if self.clock_c else (self.W / 2, self.H / 2))
@@ -659,7 +695,7 @@ class Chronos:
         self.gline([self.ind_x, h - 7, self.ind_x + self.ind_w, h - 7], T["a1"], 3, bg)
 
     def draw_footer(self, T):
-        txt = HINTS[self.mode] + "   ·   1-4 / ← → secciones  ·  T tema  ·  Z zen  ·  F pantalla completa  ·  M sonido"
+        txt = HINTS[self.mode] + "   ·   1-5 / ← → secciones  ·  T tema  ·  Z zen  ·  F pantalla completa  ·  M sonido"
         self.cv.create_text(self.W / 2, self.H - 14, text=txt, font=self.F(11), fill=mix(T["dim"], T["bg"], .1))
 
     def draw_toast(self, T):
@@ -821,8 +857,12 @@ class Chronos:
             self.seg_bar(x + 24, iy + 14, w - 48, 11, fr, P)
             cv.create_text(x + 24, iy + 40, text=sub, anchor="w", font=self.F(12), fill=P["dim"])
             iy += step
-        cv.create_text(x + 24, y + h - 24, anchor="w", font=self.F(12, "bold"), fill=mix(P["txt"], P["bg"], .3),
+        cv.create_text(x + 24, y + h - 46, anchor="w", font=self.F(12, "bold"), fill=mix(P["txt"], P["bg"], .3),
                        text=f"Día {n.timetuple().tm_yday} del año  ·  Semana {n.isocalendar()[1]}")
+        nxt = self.next_alarm()
+        txt = (f"Próxima alarma {self.fmt_hm(nxt['h'], nxt['m'])}  (en {fmt_dur(self.until(nxt))})"
+               if nxt else "Sin alarmas activas")
+        cv.create_text(x + 24, y + h - 24, anchor="w", font=self.F(12), fill=P["a2"] if nxt else P["dim"], text=txt)
 
     def panel_cielo(self, x, y, w, h, P):
         cv, n, bg = self.cv, self.now, P["bg"]
@@ -1231,6 +1271,234 @@ class Chronos:
                        text="Cada 4 sesiones de enfoque llega un descanso largo. En los descansos, "
                             "sigue el círculo: inhala cuando crece, exhala cuando se encoge.")
 
+    # ───────── 5. ALARMAS ─────────
+
+    def load_alarms(self):
+        try:
+            with open(ALARM_FILE, encoding="utf-8") as f:
+                data = json.load(f)
+            return [{"h": int(a["h"]) % 24, "m": int(a["m"]) % 60, "on": bool(a.get("on", True)),
+                     "once": bool(a.get("once", False)), "anim": 1.0 if a.get("on", True) else 0.0} for a in data]
+        except (OSError, ValueError, KeyError, TypeError):
+            return []
+
+    def save_alarms(self):
+        self.alarms.sort(key=lambda a: (a["h"], a["m"]))
+        try:
+            with open(ALARM_FILE, "w", encoding="utf-8") as f:
+                json.dump([{k: a[k] for k in ("h", "m", "on", "once")} for a in self.alarms], f, indent=2)
+        except OSError:
+            pass
+
+    def fmt_hm(self, h, m):
+        if self.h24:
+            return f"{h:02d}:{m:02d}"
+        return f"{h % 12 or 12:02d}:{m:02d} {'AM' if h < 12 else 'PM'}"
+
+    def until(self, a):
+        n = self.now
+        tgt = n.replace(hour=a["h"], minute=a["m"], second=0, microsecond=0)
+        if tgt <= n:
+            tgt += dt.timedelta(days=1)
+        return (tgt - n).total_seconds()
+
+    def next_alarm(self):
+        on = [a for a in self.alarms if a["on"]]
+        return min(on, key=self.until) if on else None
+
+    def adj_new(self, unit, d):
+        if unit == "h":
+            self.new_h = (self.new_h + d) % 24
+        else:
+            self.new_m = (self.new_m + d) % 60
+
+    def add_alarm(self, h=None, m=None, once=False):
+        h = self.new_h if h is None else h
+        m = self.new_m if m is None else m
+        if any(a["h"] == h and a["m"] == m and a["once"] == once for a in self.alarms):
+            self.toast("Ya existe una alarma a esa hora")
+            return
+        self.alarms.append({"h": h, "m": m, "on": True, "once": once, "anim": 0.0})
+        self.save_alarms()
+        a = {"h": h, "m": m}
+        self.toast(f"Alarma creada para las {self.fmt_hm(h, m)}  ·  suena en {fmt_dur(self.until(a))}")
+
+    def quick_alarm(self, mins):
+        t = self.now + dt.timedelta(minutes=mins)
+        self.add_alarm(t.hour, t.minute, once=True)
+
+    def toggle_alarm(self, a):
+        a["on"] = not a["on"]
+        self.save_alarms()
+
+    def del_alarm(self, a):
+        self.alarms = [x for x in self.alarms if x is not a]
+        self.save_alarms()
+
+    def check_alarms(self, n):
+        if self.ringing:
+            return
+        for a in self.alarms:
+            if a["on"] and a["h"] == n.hour and a["m"] == n.minute:
+                self.ringing, self.ring_t0 = a, time.time()
+                self.sound.alarm_start()
+                self.flash = 1.0
+                if a["once"]:
+                    a["on"] = False
+                break
+
+    def stop_alarm(self, snooze=False):
+        a = self.ringing
+        if a is None:
+            return
+        self.ringing = None
+        self.sound.alarm_stop()
+        if a["once"]:
+            self.alarms = [x for x in self.alarms if x is not a]
+        if snooze:
+            t = self.now + dt.timedelta(minutes=5)
+            self.alarms.append({"h": t.hour, "m": t.minute, "on": True, "once": True, "anim": 0.0})
+            self.toast(f"Pospuesta hasta las {self.fmt_hm(t.hour, t.minute)}")
+        self.save_alarms()
+
+    def arrow(self, x, y, up, cb, P):
+        s = 15
+        hv = self.hov(x - 30, y - 18, x + 30, y + 18)
+        col = P["a1"] if hv else mix(P["a1"], P["bg"], .5)
+        if up:
+            pts = (x - s, y + s * .5, x + s, y + s * .5, x, y - s * .6)
+        else:
+            pts = (x - s, y - s * .5, x + s, y - s * .5, x, y + s * .6)
+        if hv:
+            self.cv.create_polygon(pts, fill="", outline=mix(col, P["bg"], .6), width=6, joinstyle="round")
+        self.cv.create_polygon(pts, fill=col, outline="")
+        self.btns.append((x - 30, y - 18, x + 30, y + 18, cb))
+
+    def draw_alarmas(self, P, top):
+        cv, W, H, bg = self.cv, self.W, self.H, P["bg"]
+        lw = min(440, W * .38)
+        lx, ly, lh = 40, top + 26, H - top - 70
+        self.panel(lx, ly, lw, lh, "NUEVA ALARMA", P)
+        cx = lx + lw / 2
+        dsz = min(96, lw * .22)
+        dy = ly + 80 + dsz * .9
+        fm = self.F(dsz, "bold", True)
+        hh = self.new_h if self.h24 else (self.new_h % 12 or 12)
+        wpair, wcol = self.measure(fm, "00"), self.measure(fm, ":")
+        xh, xm = cx - wcol / 2 - wpair / 2, cx + wcol / 2 + wpair / 2
+        self.gtext(xh, dy, f"{hh:02d}", fm, P["txt"], bg, glow_col=P["a1"])
+        self.gtext(cx, dy, ":", fm, P["a2"], bg, glow=1)
+        self.gtext(xm, dy, f"{self.new_m:02d}", fm, P["txt"], bg, glow_col=P["a1"])
+        for x, unit, step in ((xh, "h", 1), (xm, "m", 5)):
+            self.arrow(x, dy - dsz * .78, True, lambda u=unit: self.adj_new(u, 1), P)
+            self.arrow(x, dy + dsz * .78, False, lambda u=unit: self.adj_new(u, -1), P)
+            self.wheels.append((x - wpair / 2 - 10, dy - dsz / 2, x + wpair / 2 + 10, dy + dsz / 2,
+                                lambda d, u=unit, st=step: self.adj_new(u, d * st)))
+        if not self.h24:
+            cv.create_text(cx + wcol / 2 + wpair + 16, dy, text="AM" if self.new_h < 12 else "PM", anchor="w",
+                           font=self.F(18, "bold"), fill=P["a3"])
+        cv.create_text(cx, dy + dsz * .78 + 34, font=self.F(13), fill=P["dim"],
+                       text=f"Sonaría en {fmt_dur(self.until({'h': self.new_h, 'm': self.new_m}))}")
+        by = dy + dsz * .78 + 62
+        self.button(lx + 30, by, lw - 60, 50, "+  AGREGAR ALARMA", self.add_alarm, P, px=16)
+        qy = by + 90
+        cv.create_text(lx + 30, qy, text="ALARMA RÁPIDA", anchor="w", font=self.F(13, "bold"), fill=P["a2"])
+        qw = (lw - 60 - 3 * 10) / 4
+        for i, (lab, mins) in enumerate((("+5 min", 5), ("+10 min", 10), ("+30 min", 30), ("+1 h", 60))):
+            self.button(lx + 30 + i * (qw + 10), qy + 20, qw, 40, lab, lambda mm=mins: self.quick_alarm(mm), P,
+                        col=P["a2"], px=13)
+        nxt = self.next_alarm()
+        ny = qy + 100
+        if nxt and ly + lh - ny > 150:  # cuenta regresiva hasta la próxima alarma
+            cv.create_line(lx + 30, ny, lx + lw - 30, ny, fill=mix(P["a1"], bg, .8))
+            cv.create_text(lx + 30, ny + 26, text="PRÓXIMA ALARMA", anchor="w", font=self.F(13, "bold"), fill=P["a1"])
+            cv.create_text(lx + lw - 30, ny + 26, text=self.fmt_hm(nxt["h"], nxt["m"]), anchor="e",
+                           font=self.F(14, "bold", True), fill=P["txt"])
+            left = int(self.until(nxt))
+            h, r = divmod(left, 3600)
+            self.gtext(cx, ny + 80, f"{h:02d}:{r // 60:02d}:{r % 60:02d}", self.F(min(56, lw * .13), "bold", True),
+                       P["txt"], bg, glow_col=P["a2"])
+            self.seg_bar(lx + 30, ny + 120, lw - 60, 8, 1 - left / 86400, P, n=30)
+
+        rx = lx + lw + 26
+        rw = W - 40 - rx
+        self.panel(rx, ly, rw, lh, f"MIS ALARMAS  ({len(self.alarms)})", P, P["a2"])
+        if not self.alarms:
+            cv.create_text(rx + rw / 2, ly + lh / 2, justify="center", font=self.F(15), fill=P["dim"],
+                           text="Aún no tienes alarmas.\nCrea una en el panel de la izquierda.")
+            return
+        nxt = self.next_alarm()
+        rowh = 68
+        ry = ly + 64
+        rows = max(1, int((lh - 90) / rowh))
+        for a in self.alarms[:rows]:
+            a["anim"] += ((1.0 if a["on"] else 0.0) - a["anim"]) * .25
+            is_next = a is nxt
+            x1, x2 = rx + 20, rx + rw - 20
+            self.rrect(x1, ry, x2, ry + rowh - 12, 14, fill=mix(P["bg2"], P["a1"] if is_next else bg, .1 if is_next else .3),
+                       outline=P["a1"] if is_next else mix(P["a2"], bg, .8), width=2 if is_next else 1)
+            mid = ry + (rowh - 12) / 2
+            tc = mix(P["txt"], bg, .6 * (1 - a["anim"]))
+            cv.create_text(x1 + 20, mid, text=self.fmt_hm(a["h"], a["m"]), anchor="w", font=self.F(30, "bold", True),
+                           fill=tc)
+            sub = "Una vez" if a["once"] else "Todos los días"
+            sub += f"  ·  suena en {fmt_dur(self.until(a))}" if a["on"] else "  ·  desactivada"
+            tw = self.measure(self.F(30, "bold", True), self.fmt_hm(a["h"], a["m"]))
+            cv.create_text(x1 + 40 + tw, mid, text=sub, anchor="w", font=self.F(13),
+                           fill=P["a1"] if is_next else P["dim"])
+            # interruptor animado
+            sx, sw_, sh = x2 - 130, 56, 28
+            self.rrect(sx, mid - sh / 2, sx + sw_, mid + sh / 2, sh / 2, fill=mix(mix(P["dim"], bg, .5), P["a1"], a["anim"]),
+                       outline="")
+            kx = sx + sh / 2 + (sw_ - sh) * a["anim"]
+            cv.create_oval(kx - 11, mid - 11, kx + 11, mid + 11, fill=P["txt"], outline="")
+            self.btns.append((sx - 4, mid - 18, sx + sw_ + 4, mid + 18, lambda al=a: self.toggle_alarm(al)))
+            # borrar
+            dx = x2 - 38
+            hv = self.hov(dx - 18, mid - 18, dx + 18, mid + 18)
+            cv.create_oval(dx - 16, mid - 16, dx + 16, mid + 16, fill=mix(P["a2"], bg, .7 if hv else .92),
+                           outline=P["a2"] if hv else mix(P["a2"], bg, .6))
+            cv.create_text(dx, mid - 1, text="×", font=self.F(20, "bold"), fill=P["txt"] if hv else P["a2"])
+            self.btns.append((dx - 18, mid - 18, dx + 18, mid + 18, lambda al=a: self.del_alarm(al)))
+            ry += rowh
+        if len(self.alarms) > rows:
+            cv.create_text(rx + rw / 2, ly + lh - 20, text=f"+ {len(self.alarms) - rows} más", font=self.F(13),
+                           fill=P["dim"])
+
+    def draw_alarm(self, T):
+        """Ventana de alarma sonando (encima de todo)."""
+        cv, W, H, bg = self.cv, self.W, self.H, T["bg"]
+        self.btns = []
+        self.block = False
+        el = self.now_ts - self.ring_t0
+        pulse = .5 + .5 * math.sin(el * 7)
+        # fondo sólido que late (la trama "stipple" de Tk es lentísima en Windows)
+        cv.create_rectangle(0, 0, W, H, fill=mix(bg, T["a2"], .05 + .05 * pulse), outline="")
+        cx, cy = W / 2, H / 2
+        for i in range(20):  # rayos girando detrás del panel
+            a = el * .4 + i / 10 * math.pi
+            cv.create_line(cx, cy, cx + math.cos(a) * W, cy + math.sin(a) * W, fill=mix(T["a2"], bg, .9), width=2)
+        for k in range(4):
+            r = ((el * 140 + k * 110) % 440) + 60
+            cv.create_oval(cx - r, cy - r, cx + r, cy + r, outline=mix(T["a2"], bg, r / 520), width=3)
+        if random.random() < .15:
+            self.burst(random.uniform(W * .2, W * .8), random.uniform(H * .2, H * .8), 14)
+        shake = math.sin(el * 50) * 6 * max(0.0, 1 - (el % 2.0) * 2)
+        pw, ph = 540, 340
+        x, y = cx - pw / 2 + shake, cy - ph / 2
+        self.rrect(x - 7, y - 7, x + pw + 7, y + ph + 7, 28, fill="", outline=mix(T["a2"], bg, .4 + .5 * (1 - pulse)),
+                   width=7)
+        self.rrect(x, y, x + pw, y + ph, 24, fill=T["bg2"], outline=T["a2"], width=3)
+        a = self.ringing
+        self.gtext(cx + shake, y + 48, "¡ ALARMA !", self.F(30, "bold"), mix(T["a2"], T["txt"], pulse * .5), bg, glow=2)
+        self.gtext(cx + shake, y + 140, self.fmt_hm(a["h"], a["m"]), self.F(96, "bold", True), T["txt"], T["bg2"],
+                   glow_col=T["a1"])
+        cv.create_text(cx + shake, y + 214, text=frase_hora(a["h"], a["m"]), font=self.F(15, "italic"),
+                       fill=mix(T["txt"], bg, .3))
+        bw = 200
+        self.button(cx - bw - 10, y + ph - 82, bw, 52, "DETENER  (Esc)", self.stop_alarm, T, col=T["a2"], active=True)
+        self.button(cx + 10, y + ph - 82, bw, 52, "POSPONER 5 MIN  (P)", lambda: self.stop_alarm(True), T, px=13)
+
     # ───────── entrada ─────────
 
     def set_mode(self, key):
@@ -1263,7 +1531,8 @@ class Chronos:
                 for _ in range(8):
                     self.spark(x, y, self.T["a1"], speed=3, life=25, size=2)
                 return
-        self.burst(x, y)
+        if not self.ringing:
+            self.burst(x, y)
 
     def on_wheel(self, e, d=None):
         if d is None:
@@ -1276,8 +1545,14 @@ class Chronos:
 
     def on_key(self, e):
         k = e.keysym.lower()
+        if self.ringing:
+            if k in ("escape", "space", "return"):
+                self.stop_alarm()
+            elif k == "p":
+                self.stop_alarm(snooze=True)
+            return
         keys = [key for key, _ in self.TABS]
-        if k in "1234" and len(k) == 1:
+        if k in "12345" and len(k) == 1:
             self.set_mode(keys[int(k) - 1])
         elif k in ("right", "left"):
             self.set_mode(keys[(keys.index(self.mode) + (1 if k == "right" else -1)) % len(keys)])
@@ -1321,8 +1596,12 @@ class Chronos:
                 self.pomo_reset()
         elif k == "s" and self.mode == "pomo":
             self.pomo_skip()
+        elif k == "return" and self.mode == "alarmas":
+            self.add_alarm()
 
     def on_close(self):
+        self.sound.alarm_stop()
+        self.save_alarms()
         self.root.destroy()
 
 
