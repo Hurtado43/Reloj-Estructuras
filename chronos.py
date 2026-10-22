@@ -8,10 +8,11 @@ con Python): sin HTML, sin CSS y sin librerías externas.
 
     python chronos.py
 
-Secciones (teclas 1-2 o flechas ← →):
+Secciones (teclas 1-3 o flechas ← →):
   1 Reloj       analógico neón + digital, hora en palabras, progreso del
                 día/semana/mes/año, recorrido del sol y fase lunar real.
   2 Mundo       9 ciudades con horario de verano calculado a mano.
+  3 Cronómetro  vueltas, mejor/peor vuelta y gráfico de barras.
 
 Atajos: T tema · H 12/24 h · Z modo zen · F pantalla completa
         M sonido · C campanada cada hora · clic = chispas
@@ -66,6 +67,7 @@ CHIME = [(1046, 110), (1318, 110), (1568, 220)]
 HINTS = {
     "reloj": "Clic en cualquier parte = chispas  ·  H 12/24 h  ·  C campanada horaria",
     "mundo": "Horario de verano calculado automáticamente  ·  H 12/24 h",
+    "crono": "Espacio iniciar/pausar  ·  L vuelta  ·  R reiniciar",
 }
 
 
@@ -110,6 +112,14 @@ def fmt_dur(secs):
     if h:
         return f"{h} h {m} min"
     return f"{m} min {s} s"
+
+
+def fmt_sw(t):
+    cs = int(t * 100)
+    h, r = divmod(cs, 360000)
+    m, r = divmod(r, 6000)
+    s, c = divmod(r, 100)
+    return f"{h}:{m:02d}:{s:02d}.{c:02d}" if h else f"{m:02d}:{s:02d}.{c:02d}"
 
 
 def fmt_off(o):
@@ -224,7 +234,7 @@ class Sound:
 # ───────────────────────────── aplicación ─────────────────────────────
 
 class Chronos:
-    TABS = [("reloj", "Reloj"), ("mundo", "Mundo")]
+    TABS = [("reloj", "Reloj"), ("mundo", "Mundo"), ("crono", "Cronómetro")]
     GLOW = ((11, .92), (7, .82), (4, .62))
 
     def __init__(self, root):
@@ -266,7 +276,7 @@ class Chronos:
         self.block = False
         self.parts, self.waves = [], []
         self.stars = [self.new_star(True) for _ in range(110)]
-        self.tip = self.clock_c = None
+        self.tip = self.clock_c = self.ring_c = None
         self.last = None
         self.flash = 0.0
         self.toast_msg, self.toast_t0 = None, 0.0
@@ -278,6 +288,8 @@ class Chronos:
         self.now_ts = time.time()
         self.now = dt.datetime.fromtimestamp(self.now_ts)
 
+        # cronómetro
+        self.sw_run, self.sw_t0, self.sw_acc, self.laps = False, 0.0, 0.0, []
 
         self.cv.bind("<Configure>", self.on_resize)
         self.cv.bind("<Motion>", self.on_motion)
@@ -636,7 +648,7 @@ class Chronos:
         self.gline([self.ind_x, h - 7, self.ind_x + self.ind_w, h - 7], T["a1"], 3, bg)
 
     def draw_footer(self, T):
-        txt = HINTS[self.mode] + "   ·   1-2 / ← → secciones  ·  T tema  ·  Z zen  ·  F pantalla completa  ·  M sonido"
+        txt = HINTS[self.mode] + "   ·   1-3 / ← → secciones  ·  T tema  ·  Z zen  ·  F pantalla completa  ·  M sonido"
         self.cv.create_text(self.W / 2, self.H - 14, text=txt, font=self.F(11), fill=mix(T["dim"], T["bg"], .1))
 
     def draw_toast(self, T):
@@ -954,6 +966,124 @@ class Chronos:
             self.gline([cx, cy, cx + r * length * math.sin(a), cy - r * length * math.cos(a)], col, w, bg, glow=1)
         cv.create_oval(cx - 4, cy - 4, cx + 4, cy + 4, fill=P["a1"], outline="")
 
+    # ───────── 3. CRONÓMETRO ─────────
+
+    def sw_elapsed(self):
+        return self.sw_acc + (self.now_ts - self.sw_t0 if self.sw_run else 0)
+
+    def sw_toggle(self):
+        if self.sw_run:
+            self.sw_acc += time.time() - self.sw_t0
+            self.sw_run = False
+        else:
+            self.sw_t0 = time.time()
+            self.sw_run = True
+        if self.ring_c:
+            self.wave(self.ring_c[0], self.ring_c[1], self.ring_c[2] * .3, self.ring_c[2] * 1.3, self.T["a1"])
+
+    def sw_lap(self):
+        if not self.sw_run:
+            return
+        self.laps.append(self.sw_acc + time.time() - self.sw_t0)
+        if self.ring_c:
+            cx, cy, R = self.ring_c
+            self.wave(cx, cy, R, R * 1.5, self.T["a2"])
+            for _ in range(20):
+                self.spark(cx, cy - R, self.T["a2"], speed=4)
+
+    def sw_reset(self):
+        self.sw_run, self.sw_acc, self.laps = False, 0.0, []
+
+    def ring_layout(self, top):
+        R = max(110, min((self.H - top - 190) / 2, self.W * .2))
+        cx, cy = self.W * .36, top + 52 + R
+        self.ring_c = (cx, cy, R)
+        return cx, cy, R
+
+    def draw_crono(self, P, top):
+        cv, W, H, bg = self.cv, self.W, self.H, P["bg"]
+        e = self.sw_elapsed()
+        cx, cy, R = self.ring_layout(top)
+        live = self.sw_run
+
+        cs = (e * 100) % 100  # anillo de centésimas que gira a toda velocidad
+        for i in range(100):
+            a = i / 100 * TAU
+            d = (cs - i) % 100
+            b = max(0.0, 1 - d / 30) if e > 0 else 0
+            big = i % 10 == 0
+            r1, r2 = R + 12, R + (27 if big else 19)
+            col = mix(mix(P["dim"], bg, .45 if big else .7), P["a1"], b)
+            cv.create_line(cx + r1 * math.sin(a), cy - r1 * math.cos(a), cx + r2 * math.sin(a), cy - r2 * math.cos(a),
+                           fill=col, width=2 if (big or b > .5) else 1)
+        for rr, val, col, w in ((R - 8, (e % 60) / 60, P["a2"], 6), (R - 25, (e % 3600) / 3600, P["a3"], 3)):
+            cv.create_oval(cx - rr, cy - rr, cx + rr, cy + rr, outline=mix(col, bg, .86), width=w)
+            self.garc(cx, cy, rr, 90, -val * 360, col, w, bg)
+
+        tot = int(e * 100)
+        cc, s, m, h = tot % 100, (tot // 100) % 60, (tot // 6000) % 60, tot // 360000
+        main = f"{h}:{m:02d}:{s:02d}" if h else f"{m:02d}:{s:02d}"
+        dsz = R * (.32 if h else .42)
+        fm, fc = self.F(dsz, "bold", True), self.F(dsz * .45, "bold", True)
+        wm, wc = self.measure(fm, main), self.measure(fc, ".00")
+        x0 = cx - (wm + wc) / 2
+        self.gtext(x0, cy, main, fm, P["txt"], bg, glow_col=P["a1"], anchor="w")
+        self.gtext(x0 + wm, cy + dsz * .2, f".{cc:02d}", fc, P["a2"], bg, glow=1, anchor="w")
+        state = "EN MARCHA" if live else ("EN PAUSA" if e > 0 else "LISTO")
+        cv.create_text(cx, cy - dsz * .85, text=state, font=self.F(14, "bold"), fill=P["a1"] if live else P["dim"])
+        if self.laps:
+            cv.create_text(cx, cy + dsz * .85, text=f"Vuelta {len(self.laps) + 1}:  {fmt_sw(e - self.laps[-1])}",
+                           font=self.F(14, mono=True), fill=P["a3"])
+
+        bw, bh, g = 150, 46, 16
+        by = cy + R + 44
+        bx = cx - (bw * 3 + g * 2) / 2
+        self.button(bx, by, bw, bh, "PAUSAR" if live else ("REANUDAR" if e > 0 else "INICIAR"), self.sw_toggle, P,
+                    active=live)
+        self.button(bx + bw + g, by, bw, bh, "VUELTA", self.sw_lap, P, col=P["a2"])
+        self.button(bx + 2 * (bw + g), by, bw, bh, "REINICIAR", self.sw_reset, P, col=P["a3"])
+
+        px = W * .62
+        pw, py, ph = W - 40 - px, top + 26, H - top - 70
+        self.panel(px, py, pw, ph, f"VUELTAS  ({len(self.laps)})", P, P["a2"])
+        if not self.laps:
+            cv.create_text(px + pw / 2, py + ph / 2, text="Pulsa VUELTA (L) mientras\nel cronómetro está en marcha",
+                           justify="center", font=self.F(15), fill=P["dim"])
+            return
+        durs = [self.laps[0]] + [self.laps[i] - self.laps[i - 1] for i in range(1, len(self.laps))]
+        best = durs.index(min(durs)) if len(durs) > 1 else -1
+        worst = durs.index(max(durs)) if len(durs) > 1 else -1
+        chart_h = 120 if len(durs) > 1 else 0
+        hy = py + 66
+        fh, fr = self.F(12, "bold"), self.F(15, mono=True)
+        cv.create_text(px + 26, hy, text="Nº", anchor="w", font=fh, fill=P["dim"])
+        cv.create_text(px + pw * .45, hy, text="VUELTA", anchor="center", font=fh, fill=P["dim"])
+        cv.create_text(px + pw - 26, hy, text="TOTAL", anchor="e", font=fh, fill=P["dim"])
+        ry = hy + 30
+        rows = max(1, int((ph - 110 - chart_h) / 30))
+        for i in range(len(durs) - 1, max(-1, len(durs) - 1 - rows), -1):
+            col = P["a1"] if i == best else P["a2"] if i == worst else P["txt"]
+            if i in (best, worst):
+                self.rrect(px + 16, ry - 13, px + pw - 16, ry + 13, 8, fill=mix(col, bg, .88), outline="")
+            cv.create_text(px + 26, ry, text=f"{i + 1:02d}", anchor="w", font=fr, fill=col)
+            cv.create_text(px + pw * .45, ry, text=fmt_sw(durs[i]), anchor="center", font=fr, fill=col)
+            cv.create_text(px + pw - 26, ry, text=fmt_sw(self.laps[i]), anchor="e", font=fr, fill=mix(col, bg, .3))
+            ry += 30
+        if chart_h:
+            data = durs[-24:]
+            off = len(durs) - len(data)
+            mx_ = max(data)
+            cx0, cy0, cwid = px + 26, py + ph - 26, pw - 52
+            cv.create_line(cx0, cy0, cx0 + cwid, cy0, fill=mix(P["dim"], bg, .3))
+            bwid = cwid / len(data)
+            for j, d in enumerate(data):
+                idx = j + off
+                hgt = (chart_h - 30) * d / mx_
+                col = P["a1"] if idx == best else P["a2"] if idx == worst else mix(P["a3"], bg, .3)
+                cv.create_rectangle(cx0 + j * bwid + 2, cy0 - hgt, cx0 + (j + 1) * bwid - 2, cy0, fill=col, outline="")
+            cv.create_text(cx0, cy0 - chart_h + 8, text="MEJOR", anchor="w", font=self.F(11, "bold"), fill=P["a1"])
+            cv.create_text(cx0 + 60, cy0 - chart_h + 8, text="PEOR", anchor="w", font=self.F(11, "bold"), fill=P["a2"])
+
     # ───────── entrada ─────────
 
     def set_mode(self, key):
@@ -1000,7 +1130,7 @@ class Chronos:
     def on_key(self, e):
         k = e.keysym.lower()
         keys = [key for key, _ in self.TABS]
-        if k in "12" and len(k) == 1:
+        if k in "123" and len(k) == 1:
             self.set_mode(keys[int(k) - 1])
         elif k in ("right", "left"):
             self.set_mode(keys[(keys.index(self.mode) + (1 if k == "right" else -1)) % len(keys)])
@@ -1029,8 +1159,15 @@ class Chronos:
             elif self.zen:
                 self.zen = False
         elif k == "space":
-            if self.clock_c:
+            if self.mode == "crono":
+                self.sw_toggle()
+            elif self.clock_c:
                 self.burst(*self.clock_c[:2], 40)
+        elif k == "l" and self.mode == "crono":
+            self.sw_lap()
+        elif k == "r":
+            if self.mode == "crono":
+                self.sw_reset()
 
     def on_close(self):
         self.root.destroy()
